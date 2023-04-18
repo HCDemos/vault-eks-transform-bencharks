@@ -1,0 +1,186 @@
+
+
+#Initialize and unseal vault-0
+kubectl exec vault-0 -- vault operator init \
+    -key-shares=1 \
+    -key-threshold=1 \
+    -format=json > vault-cluster-keys.json
+
+#Show the unseal key
+cat vault-cluster-keys.json | jq -r ".unseal_keys_b64[]"
+
+#Set env var for the unseal key:
+VAULT_UNSEAL_KEY=$(cat vault-cluster-keys.json | jq -r ".unseal_keys_b64[]")
+
+#Unseal vault:
+kubectl exec vault-0 -- vault operator unseal $VAULT_UNSEAL_KEY
+
+#Join the other vault instances to the cluster
+#get the root token
+cat vault-cluster-keys.json | jq -r ".root_token"
+
+#Set env var for root token:
+CLUSTER_ROOT_TOKEN=$(cat vault-cluster-keys.json | jq -r ".root_token")
+
+Install license
+vault write sys/license "text=<license-text>"
+
+
+#Login to vault:
+kubectl exec vault-0 -- vault login $CLUSTER_ROOT_TOKEN
+
+#List raft peers:
+kubectl exec vault-0 -- vault operator raft list-peers
+
+#Join vault-1 to cluster:
+kubectl exec vault-1 -- vault operator raft join http://vault-0.vault-primary-internal:8200
+
+#Join vault-2 to the cluster:
+kubectl exec vault-2 -- vault operator raft join http://vault-primary-0.vault-primary-internal:8200
+
+#unseal vault-1
+kubectl exec vault-1 -- vault operator unseal $VAULT_UNSEAL_KEY
+
+#unseal vault-2
+kubectl exec vault-2 -- vault operator unseal $VAULT_UNSEAL_KEY
+
+#list vault cluster instances:
+kubectl exec vault-0 -- vault operator raft list-peers
+
+#Port forward to vault-0 so you can check the UI:
+kubectl port-forward vault-primary-0 8200:8200
+
+# Set env vars VAULT_ADDR etc.
+
+# Login with root token
+
+# create admin-policy.hcl 
+tee admin-policy.hcl <<EOF
+# Read system health check
+path "sys/health"
+{
+  capabilities = ["read", "sudo"]
+}
+
+# Create and manage ACL policies broadly across Vault
+
+# List existing policies
+path "sys/policies/acl"
+{
+  capabilities = ["list"]
+}
+
+# Create and manage ACL policies
+path "sys/policies/acl/*"
+{
+  capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+}
+
+# Enable and manage authentication methods broadly across Vault
+
+# Manage auth methods broadly across Vault
+path "auth/*"
+{
+  capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+}
+
+# Create, update, and delete auth methods
+path "sys/auth/*"
+{
+  capabilities = ["create", "update", "delete", "sudo"]
+}
+
+# List auth methods
+path "sys/auth"
+{
+  capabilities = ["read"]
+}
+
+# Enable and manage the key/value secrets engine at `secret/` path
+
+# List, create, update, and delete key/value secrets
+path "secret/*"
+{
+  capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+}
+
+# List, create, update, and delete transform secrets
+path "transform/*"
+{
+  capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+}
+
+# Manage secrets engines
+path "sys/mounts/*"
+{
+  capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+}
+
+# List existing secrets engines.
+path "sys/mounts"
+{
+  capabilities = ["read"]
+}
+EOF
+
+#Add admin policy to Vault
+vault policy write admin admin-policy.hcl
+
+#Enable userpass
+vault auth enable userpass
+
+#Create admin user in userpass auth method
+vault write auth/userpass/users/admin password="<long-random-password>" policies="admin"
+
+#Login as admin user
+vault login -method=userpass username=admin
+
+#set VAULT_TOKEN
+
+#go thru transorm setup as guided here:  https://learn.hashicorp.com/tutorials/vault/transform
+
+#Enable transform secrets engine
+vault secrets enable transform
+
+#Setup FPE transform for email
+vault write transform/transformations/fpe/fpe-email \
+     template="fpe-email-tmpl" \
+     tweak_source=internal \
+     allowed_roles=payments
+
+# Create a new alphabet for the fpe email transform to use
+vault write transform/alphabet/alphanumeric-plus alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJCKLMNOPQRSTUVWXYZ-_@.0123456789#"
+
+# Create a new template for the fpe email transform
+vault write transform/template/fpe-email-tmpl type=regex \
+    pattern="(.+)@.+" \
+    alphabet=alphanumeric-plus
+
+# Enable the fpe email tweaked transform
+vault write transform/transformations/fpe/fpe-email-tweaked \
+     template="fpe-email-tmpl" \
+     tweak_source=supplied \
+     allowed_roles=payments
+
+#Setup masking email template
+vault write transform/template/mask-email-tmpl type=regex \
+    pattern="(.+)@.+" \
+#    alphabet=builtin/alphanumeric \
+    alphabet=alphanumeric-plus
+
+#Setup masking email transform to use the template
+vault write transform/transformations/masking/mask-email \
+    template=mask-email-tmpl \
+    masking_character=# \
+    allowed_roles=payments
+
+#Setup token transform for email
+vault write transform/transformations/tokenization/tokenize-email \
+    allowed_roles=payments \
+    max_ttl=24h
+
+
+# Enable the payments role for all the transforms
+vault write transform/role/payments transformations=card-number,decimal,date-time,mask-email,tokenize-email,fpe-email,fpe-email-tweaked
+
+
