@@ -5,21 +5,21 @@ variable "environment" {
 
 variable "prefix" {
   description = "used to associate resources with a person"
-  default     = "dpeacock"
+  default     = "vault-benchmark"
 }
 
 variable "region"{
-  description = "The region Terraform deploys your instance"
+  description = "The region Terraform deploys your instance to"
 }
 
 variable "owner" {
-  default     = "vaul"
+  default     = "vault"
   description = "person from HC that deployed the resource"
 }
 
 variable "hashi-region" {
-  default     = "nymetro"
-  description = "HC region that the owner belongs to"
+  default     = "hashi-region"
+  description = "region that the owner belongs to"
 }
 
 variable "purpose" {
